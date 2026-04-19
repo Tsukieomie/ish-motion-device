@@ -1,0 +1,20 @@
+--- a/app/AppDelegate.m
++++ b/app/AppDelegate.m
+@@ -7,6 +7,7 @@
+ #import "PasteboardDevice.h"
+ #import "LocationDevice.h"
++#import "MotionDevice.h"
+ #import "NSObject+SafeKVO.h"
+ 
+@@ -60,6 +61,11 @@
+     err = dyn_dev_register(&location_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_LOCATION_MINOR);
+     if (err != 0)
+         return err;
+     generic_mknod(AT_FDCWD, "/dev/location", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_LOCATION_MINOR));
+ 
++    err = dyn_dev_register(&motion_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_MOTION_MINOR);
++    if (err != 0)
++        return err;
++    generic_mknod(AT_FDCWD, "/dev/motion", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_MOTION_MINOR));
++
+     do_mount(&procpfs, "proc", "/proc", "", 0);

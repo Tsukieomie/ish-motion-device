@@ -1,0 +1,11 @@
+--- a/fs/devices.h
++++ b/fs/devices.h
+@@ -22,6 +22,8 @@ 
+ // /dev/clipboard
+ #define DEV_CLIPBOARD_MINOR 0
+ // /dev/gps  (also named /dev/location)
+ #define DEV_LOCATION_MINOR  1
++// /dev/motion  (accelerometer + gyroscope + attitude + barometer)
++#define DEV_MOTION_MINOR    2
+ 
+ #endif
