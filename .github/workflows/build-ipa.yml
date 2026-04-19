@@ -1,0 +1,156 @@
+name: Build iSH /dev/motion IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+
+      - name: Clone iSH source with submodules
+        run: |
+          git clone --recursive https://github.com/ish-app/ish.git ish-source
+          cd ish-source
+          git submodule update --init --recursive
+
+      - name: Apply /dev/motion patch
+        run: |
+          cd ish-source
+
+          # 1. Copy MotionDevice source files
+          cp ../MotionDevice.h app/MotionDevice.h
+          cp ../MotionDevice.m app/MotionDevice.m
+
+          # 2. Patch fs/devices.h — add DEV_MOTION_MINOR after DEV_LOCATION_MINOR
+          python3 - << 'EOF'
+          import re
+          path = "fs/devices.h"
+          src = open(path).read()
+          insert = '\n// /dev/motion  (accelerometer + gyroscope + attitude + barometer)\n#define DEV_MOTION_MINOR    2\n'
+          src = src.replace('#define DEV_LOCATION_MINOR  1', '#define DEV_LOCATION_MINOR  1' + insert)
+          open(path, 'w').write(src)
+          print("✓ fs/devices.h patched")
+          EOF
+
+          # 3. Patch app/AppDelegate.m
+          python3 - << 'EOF'
+          path = "app/AppDelegate.m"
+          src = open(path).read()
+
+          # Add import after LocationDevice.h
+          if '#import "MotionDevice.h"' not in src:
+              src = src.replace('#import "LocationDevice.h"', '#import "LocationDevice.h"\n#import "MotionDevice.h"')
+              print("✓ MotionDevice import added")
+          else:
+              print("⚡ MotionDevice import already present")
+
+          # Add device registration after location_dev block
+          location_block = '''    err = dyn_dev_register(&location_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_LOCATION_MINOR);
+              if (err != 0)
+                  return err;
+              generic_mknodat(AT_PWD, "/dev/location", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_LOCATION_MINOR));'''
+
+          motion_block = '''
+              err = dyn_dev_register(&motion_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_MOTION_MINOR);
+              if (err != 0)
+                  return err;
+              generic_mknodat(AT_PWD, "/dev/motion", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_MOTION_MINOR));'''
+
+          if 'motion_dev' not in src:
+              # Find the location block with flexible whitespace
+              import re
+              pattern = r'(err = dyn_dev_register\(&location_dev.*?generic_mknodat\(AT_PWD, "/dev/location"[^\n]*\n)'
+              match = re.search(pattern, src, re.DOTALL)
+              if match:
+                  src = src[:match.end()] + '\n    err = dyn_dev_register(&motion_dev, DEV_CHAR, DYN_DEV_MAJOR, DEV_MOTION_MINOR);\n    if (err != 0)\n        return err;\n    generic_mknodat(AT_PWD, "/dev/motion", S_IFCHR|0666, dev_make(DYN_DEV_MAJOR, DEV_MOTION_MINOR));\n' + src[match.end():]
+                  print("✓ motion_dev registration added")
+              else:
+                  print("✗ Could not find location_dev block — check manually")
+          else:
+              print("⚡ motion_dev already present")
+
+          open(path, 'w').write(src)
+          EOF
+
+          # 4. Verify
+          echo "=== Verification ==="
+          grep "DEV_MOTION_MINOR" fs/devices.h && echo "✓ devices.h OK"
+          grep "MotionDevice.h" app/AppDelegate.m && echo "✓ AppDelegate import OK"
+          grep "motion_dev" app/AppDelegate.m && echo "✓ AppDelegate registration OK"
+          ls app/MotionDevice.h app/MotionDevice.m && echo "✓ MotionDevice files present"
+
+      - name: Add MotionDevice to Xcode project
+        run: |
+          cd ish-source
+          gem install xcodeproj --quiet 2>&1 | tail -1
+          ruby - << 'EOF'
+          require 'xcodeproj'
+          project = Xcodeproj::Project.open('iSH.xcodeproj')
+          target = project.targets.find { |t| t.name == 'iSH' }
+          group = project.main_group.find_subpath('app', false)
+
+          added = []
+          ['MotionDevice.h', 'MotionDevice.m'].each do |fname|
+            next if group.files.any? { |f| f.path == fname }
+            file_ref = group.new_reference(fname)
+            target.add_file_references([file_ref]) if fname.end_with?('.m')
+            added << fname
+          end
+
+          project.save
+          puts added.empty? ? "⚡ Files already in project" : "✓ Added: #{added.join(', ')}"
+          EOF
+
+      - name: Install Meson and Ninja
+        run: brew install meson ninja
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build unsigned archive
+        run: |
+          cd ish-source
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/iSH.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            archive \
+            | xcpretty || xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/iSH.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            archive
+
+      - name: Package IPA
+        run: |
+          APP_PATH=$(find "$RUNNER_TEMP/iSH.xcarchive" -name "*.app" | grep -v PlugIns | head -1)
+          echo "Packaging: $APP_PATH"
+          mkdir -p /tmp/Payload
+          cp -r "$APP_PATH" /tmp/Payload/iSH.app
+          cd /tmp && zip -r iSH-motion.ipa Payload/
+          ls -lh /tmp/iSH-motion.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: iSH-motion-device-ipa
+          path: /tmp/iSH-motion.ipa
+          retention-days: 7
